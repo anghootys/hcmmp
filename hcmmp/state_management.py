@@ -38,6 +38,8 @@ hcm_sensor_queue = Queue(maxsize=1024 * 1024)
 hcm_plot_queue = Queue(maxsize=1024 * 1024)
 hcm_store_queue = Queue(maxsize=1024 * 1024 * 50)
 
+is_threads_created = False
+
 
 def scan_HCMMP_broadcast():
     hcmmp_adv_list = []
@@ -104,18 +106,23 @@ def scan_HCMMP_broadcast():
 
 
 def handle_HCMMP_data_gathering(hcmmp_connection: HCMMPConnection):
-    # process sensor data
-    sensor_reader_thread = Thread(target=process_hcm_sensor_data)
-    sensor_reader_thread.start()
+    global is_threads_created
 
-    # plot processed data
-    plot_thread = Thread(target=launch_ppg_plot, args=(hcm_plot_queue,))
-    plot_thread.daemon = True
-    plot_thread.start()
+    if not is_threads_created:
+        # process sensor data
+        sensor_reader_thread = Thread(target=process_hcm_sensor_data)
+        sensor_reader_thread.start()
 
-    # store processed data
-    store_thread = Thread(target=store_hcm_sensor_data, args=(hcmmp_connection.get_host_id(),))
-    store_thread.start()
+        # plot processed data
+        plot_thread = Thread(target=launch_ppg_plot, args=(hcm_plot_queue,))
+        plot_thread.daemon = True
+        plot_thread.start()
+
+        # store processed data
+        store_thread = Thread(target=store_hcm_sensor_data, args=(hcmmp_connection.get_host_id(),))
+        store_thread.start()
+
+    is_threads_created = True
 
     # timeout counter for connection timeouts (if it reaches 10, reconnect to host using host_id)
     timeout_count = 0
@@ -386,7 +393,6 @@ def process_hcm_sensor_data():
                 dc_avg = sum(dc_buffer_queue) / len(dc_buffer_queue)
                 ac_value = ir_value - dc_avg
 
-                # ===== Multi-stage Bandpass Filter =====
                 # High-pass filter (remove baseline drift)
                 hp_out = hp_a0 * ac_value + hp_a1 * hp_x1 - hp_b1 * hp_y1
                 hp_x1 = ac_value
@@ -415,7 +421,7 @@ def process_hcm_sensor_data():
                 # Send processed data to plot queue to show on animated plot
                 try:
                     hcm_plot_queue.put_nowait({
-                        "ac": ac_value,
+                        "bpm": current_bpm,
                         "filtered": filtered,
                         "timestamp": timestamp
                     })
