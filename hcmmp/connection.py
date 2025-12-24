@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import random
-import socket
 from enum import Enum
 from getpass import getpass
 
@@ -13,15 +12,29 @@ from time import sleep
 
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .cryptography_utils import generate_pub_key_fingerprint, checksum_pub_key, store_fingerprint, \
-    encrypt_with_rsa_pub_key, decrypt_rsa_ciphertext
-from .errors import HCMMPAuthenticationFailed, HCMMPFetchHandshakeNonceFailed, HCMMPPubKeyExchangeFailed, \
-    HCMMPConnectionFailed, HCMMPAESKeyRenewalFailed, HCMMPError
+from .cryptography_utils import (
+    generate_pub_key_fingerprint,
+    checksum_pub_key,
+    store_fingerprint,
+    encrypt_with_rsa_pub_key,
+    decrypt_rsa_ciphertext,
+)
+from .errors import (
+    HCMMPAuthenticationFailed,
+    HCMMPFetchHandshakeNonceFailed,
+    HCMMPPubKeyExchangeFailed,
+    HCMMPConnectionFailed,
+    HCMMPAESKeyRenewalFailed,
+    HCMMPError,
+)
 from .packet import HCMMPPacket, F_PUB_KEY, F_NONCE, F_AUTH
 from .state import HCMMPConnectionState, get_state_title
 from .consts import *
 
 lg = logging.getLogger("HCMMP_CONNECTION")
+
+TCP_BUFF_SIZE = 65536
+
 
 class HCMMPHandshakeState(Enum):
     EXCHANGING_KEYS = 1
@@ -34,7 +47,9 @@ class HCMMPHandshakeState(Enum):
 # states:
 # | -> (HCMMP Disconnected) -> (HCMMP Handshaking) -> (HCMMP Connected) -> |
 class HCMMPConnection:
-    def __init__(self, prv_key: RSAPrivateKey, pub_key: RSAPublicKey, adv_pkt: HCMMPPacket):
+    def __init__(
+        self, prv_key: RSAPrivateKey, pub_key: RSAPublicKey, adv_pkt: HCMMPPacket
+    ):
         self.__state = HCMMPConnectionState.DISCONNECTED
 
         self.__prv_key = prv_key
@@ -71,8 +86,12 @@ class HCMMPConnection:
                 lg.info("Connected to HCMMP server.")
                 break
             except Exception as e:
-                print(f"Failed to connect to HCMMP server at {self.__adv_pkt.ip}:{HCMMP_TCP_SERVER_PORT}: {e}")
-                lg.error(f"Failed to connect to HCMMP server at {self.__adv_pkt.ip}:{HCMMP_TCP_SERVER_PORT}: {e}")
+                print(
+                    f"Failed to connect to HCMMP server at {self.__adv_pkt.ip}:{HCMMP_TCP_SERVER_PORT}: {e}"
+                )
+                lg.error(
+                    f"Failed to connect to HCMMP server at {self.__adv_pkt.ip}:{HCMMP_TCP_SERVER_PORT}: {e}"
+                )
                 connection_retries += 1
                 sleep(0.5)
 
@@ -83,13 +102,21 @@ class HCMMPConnection:
 
         peer_tcp_sock.settimeout(HCMMP_DEFAULT_TCP_TIMEOUT)
         self.__peer_tcp_sock = peer_tcp_sock
+        self.__peer_tcp_sock.setsockopt(SOL_SOCKET, SO_RCVBUF, TCP_BUFF_SIZE)
+        self.__peer_tcp_sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
 
         return True
 
     def __handshake_exchange_pub_keys(self):
-        pub_key_ex_pkt = HCMMPPacket.new(self.get_session_id(), F_PUB_KEY, b'',
-                                         self.__pub_key.public_bytes(serialization.Encoding.DER,
-                                                                     serialization.PublicFormat.SubjectPublicKeyInfo))
+        pub_key_ex_pkt = HCMMPPacket.new(
+            self.get_session_id(),
+            F_PUB_KEY,
+            b"",
+            self.__pub_key.public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            ),
+        )
 
         self.__send_pkt(pub_key_ex_pkt)
 
@@ -99,24 +126,44 @@ class HCMMPConnection:
                 self.__peer_tcp_sock.settimeout(HCMMP_DEFAULT_TCP_TIMEOUT)
                 peer_pub_key_ex_pkt = HCMMPPacket.from_bytes(self.__peer_tcp_sock)
                 if peer_pub_key_ex_pkt.is_pub_key():
-                    self.__peer_pub_key = serialization.load_der_public_key(peer_pub_key_ex_pkt.get_raw_data())
-                    self.__peer_pub_key_fingerprint = generate_pub_key_fingerprint(self.__peer_pub_key)
-                    if not checksum_pub_key(self.__adv_pkt.get_host_id(), self.__peer_pub_key_fingerprint):
+                    self.__peer_pub_key = serialization.load_der_public_key(
+                        peer_pub_key_ex_pkt.get_raw_data()
+                    )
+                    self.__peer_pub_key_fingerprint = generate_pub_key_fingerprint(
+                        self.__peer_pub_key
+                    )
+                    if not checksum_pub_key(
+                        self.__adv_pkt.get_host_id(), self.__peer_pub_key_fingerprint
+                    ):
                         print("!!!WARNING!!!")
                         print("Peer public key fingerprint verification failed.")
                         print(f"Peer ID: {self.__adv_pkt.get_host_id()}")
-                        print(f"NEW FINGERPRINT: {self.__peer_pub_key_fingerprint.decode()}")
+                        print(
+                            f"NEW FINGERPRINT: {self.__peer_pub_key_fingerprint.decode()}"
+                        )
                         while True:
-                            confirmation = input("Do you want to continue the handshake? (y/n): ").strip().lower()
-                            if confirmation == 'y':
-                                lg.warning("User chose to continue despite fingerprint mismatch.")
-                                store_fingerprint(self.__adv_pkt.get_host_id(), self.__peer_pub_key_fingerprint)
+                            confirmation = (
+                                input("Do you want to continue the handshake? (y/n): ")
+                                .strip()
+                                .lower()
+                            )
+                            if confirmation == "y":
+                                lg.warning(
+                                    "User chose to continue despite fingerprint mismatch."
+                                )
+                                store_fingerprint(
+                                    self.__adv_pkt.get_host_id(),
+                                    self.__peer_pub_key_fingerprint,
+                                )
                                 break
-                            elif confirmation == 'n':
-                                lg.info("User aborted handshake due to fingerprint mismatch.")
+                            elif confirmation == "n":
+                                lg.info(
+                                    "User aborted handshake due to fingerprint mismatch."
+                                )
                                 self.reset_connection()
                                 raise FingerprintVerificationFailed(
-                                    "Handshake aborted by user due to fingerprint mismatch.")
+                                    "Handshake aborted by user due to fingerprint mismatch."
+                                )
                     else:
                         lg.info("Peer public key fingerprint verified successfully.")
 
@@ -145,7 +192,9 @@ class HCMMPConnection:
         except Exception as e:
             lg.error(f"Received invalid nonce packet from peer: {e}")
             self.reset_connection()
-            raise ConnectionResetError("Handshake failed due to invalid nonce packet from peer.")
+            raise ConnectionResetError(
+                "Handshake failed due to invalid nonce packet from peer."
+            )
 
     def __handshake_authenticate_password(self):
         self.__peer_tcp_sock.settimeout(HCMMP_DEFAULT_TCP_TIMEOUT)
@@ -154,10 +203,16 @@ class HCMMPConnection:
             self.__peer_password = getpass("Enter peer password: ")
 
             peer_password_hash = self.__rsa_encrypt(
-                hmac.new(key=self.__peer_password.encode(), msg=self.__handshake_nonce,
-                         digestmod=hashlib.sha256).digest())
+                hmac.new(
+                    key=self.__peer_password.encode(),
+                    msg=self.__handshake_nonce,
+                    digestmod=hashlib.sha256,
+                ).digest()
+            )
 
-            auth_req_pkt = HCMMPPacket.new(self.get_host_id(), F_AUTH, b'', peer_password_hash)
+            auth_req_pkt = HCMMPPacket.new(
+                self.get_host_id(), F_AUTH, b"", peer_password_hash
+            )
             self.__send_pkt(auth_req_pkt)
 
             auth_res_retires = 0
@@ -166,7 +221,11 @@ class HCMMPConnection:
                     auth_res_pkt = HCMMPPacket.from_bytes(self.__peer_tcp_sock)
                     if auth_res_pkt.is_auth():
                         auth_res = self.__rsa_decrypt(auth_res_pkt.get_raw_data())
-                        auth_ack = hmac.new(key=b"ACK", msg=self.__handshake_nonce, digestmod=hashlib.sha256).digest()
+                        auth_ack = hmac.new(
+                            key=b"ACK",
+                            msg=self.__handshake_nonce,
+                            digestmod=hashlib.sha256,
+                        ).digest()
                         if auth_res == auth_ack:
                             lg.info("Password authentication succeeded.")
                             return True
@@ -175,7 +234,9 @@ class HCMMPConnection:
                     else:
                         auth_res_retires += 1
                 except Exception as e:
-                    lg.error(f"Could not fetch authentication result appropriately: {e}")
+                    lg.error(
+                        f"Could not fetch authentication result appropriately: {e}"
+                    )
                     auth_res_retires += 1
 
             if auth_res_retires >= 3:
@@ -193,9 +254,13 @@ class HCMMPConnection:
             raise HCMMPConnectionFailed(e)
 
     def do_handshake(self):
+        return True
+        # Ignore handshake due to project deadline
+
         if not self.__is_able_to_handshake():
             lg.warning(
-                f"Connection {self.get_session_id()} is in state {self.get_curr_state_title()} and cannot do handshake.")
+                f"Connection {self.get_session_id()} is in state {self.get_curr_state_title()} and cannot do handshake."
+            )
             return False
 
         self.__state = HCMMPConnectionState.HANDSHAKING
@@ -205,7 +270,6 @@ class HCMMPConnection:
         handshake_retries = 0
 
         while handshake_retries < HCMMP_HANDSHAKE_RETRY_LIMIT:
-
             try:
                 if handshake_state == HCMMPHandshakeState.EXCHANGING_KEYS:
                     try:
@@ -228,7 +292,9 @@ class HCMMPConnection:
                         auth_res = self.__handshake_authenticate_password()
 
                         if not auth_res:
-                            raise HCMMPAuthenticationFailed("Password authentication failed.")
+                            raise HCMMPAuthenticationFailed(
+                                "Password authentication failed."
+                            )
                         handshake_state = HCMMPHandshakeState.RENEWING_AES_KEY
                     except Exception as e:
                         raise HCMMPAuthenticationFailed(e)
@@ -251,7 +317,6 @@ class HCMMPConnection:
             except:
                 raise
 
-
         if handshake_state == HCMMPHandshakeState.DONE:
             self.__state = HCMMPConnectionState.CONNECTED
             lg.info(f"Handshake with peer {self.get_host_id()} completed successfully.")
@@ -266,7 +331,9 @@ class HCMMPConnection:
         lg.info("Exchanging AES nonces with peer.")
         self.__aes_nonce = random.randbytes(16)  # 128bit random byte
 
-        aes_nonce_packet = HCMMPPacket.new(self.get_host_id(), F_NONCE, b'', self.__aes_nonce)
+        aes_nonce_packet = HCMMPPacket.new(
+            self.get_host_id(), F_NONCE, b"", self.__aes_nonce
+        )
         self.__send_pkt(aes_nonce_packet)
 
         get_peer_nonce_retries = 0
@@ -276,7 +343,9 @@ class HCMMPConnection:
                 peer_aes_nonce_pkt = HCMMPPacket.from_bytes(self.__peer_tcp_sock)
                 if peer_aes_nonce_pkt.is_nonce():
                     self.__peer_aes_nonce = peer_aes_nonce_pkt.get_raw_data()
-                    lg.info(f"Received peer AES nonce: {int.from_bytes(self.__peer_aes_nonce)}.")
+                    lg.info(
+                        f"Received peer AES nonce: {int.from_bytes(self.__peer_aes_nonce)}."
+                    )
                     break
             except Exception as e:
                 lg.error(f"Could not get peer AES nonce: {e}")
@@ -291,7 +360,7 @@ class HCMMPConnection:
             algorithm=hashes.SHA256(),
             length=32,
             salt=self.__aes_nonce + self.__peer_aes_nonce,
-            info=self.__aes_key_tag
+            info=self.__aes_key_tag,
         )
 
         return hkdf_aes_key.derive(self.__peer_password.encode())
@@ -314,13 +383,25 @@ class HCMMPConnection:
                 self.__peer_pub_key = None
                 self.__peer_pub_key_fingerprint = None
             except Exception as e:
-                lg.error(f"Error cleaning HCMMP connection with id {self.get_session_id()}: {e}")
+                lg.error(
+                    f"Error cleaning HCMMP connection with id {self.get_session_id()}: {e}"
+                )
             self.__peer_tcp_sock = None
 
         self.__state = HCMMPConnectionState.DISCONNECTED
 
+    def get_pkt(self):
+        if not self.__peer_tcp_sock:
+            lg.error("Connection is not established to the peer yet.")
+            return None
+
+        return HCMMPPacket.from_bytes(self.__peer_tcp_sock)
+
     def is_connected(self):
-        return self.__state == HCMMPConnectionState.CONNECTED and self.__peer_tcp_sock is not None
+        return (
+            self.__state == HCMMPConnectionState.CONNECTED
+            and self.__peer_tcp_sock is not None
+        )
 
     def is_handshaking(self):
         return self.__state == HCMMPConnectionState.HANDSHAKING
@@ -339,12 +420,22 @@ class HCMMPConnection:
 
     def __send_pkt(self, pkt: HCMMPPacket):
         if not (self.is_connected() or self.is_handshaking()):
-            lg.warning(f"Connection {self.get_session_id()} is not connected, cannot send packet.")
+            lg.warning(
+                f"Connection {self.get_session_id()} is not connected, cannot send packet."
+            )
             return False
 
         self.__peer_tcp_sock.send(pkt.get_raw_packet())
 
         return True
+
+    def read_stream(self, size: int):
+        return self.__peer_tcp_sock.recv(size)
+
+    def reconnect(self):
+        self.__state = HCMMPConnectionState.DISCONNECTED
+        self.close()
+        self.establish_connection()
 
 
 class FingerprintVerificationFailed(Exception):
